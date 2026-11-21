@@ -1,0 +1,14 @@
+cpu/all/averageTemperature Average CPU Temperature
+cpu/all/maximumTemperature Maximum CPU Temperature
+cpu/all/usage Total Usage
+gpu/gpu0 GPU 1
+gpu/gpu0/power GPU 1 Power
+gpu/gpu0/temperature GPU 1 Temperature
+gpu/gpu0/usage GPU 1 Usage
+lmsensors/it8688-isa-0a40/fan1 Fan 1
+lmsensors/it8688-isa-0a40/fan2 Fan 2
+lmsensors/it8688-isa-0a40/temp1 Temperature 1
+lmsensors/it8688-isa-0a40/temp2 Temperature 2
+lmsensors/it8688-isa-0a40/temp3 Temperature 3
+lmsensors/nvme-pci-0100/temp1 Composite
+memory/physical/usedPercent Used Physical Memory Percentage

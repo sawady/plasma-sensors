@@ -1,0 +1,87 @@
+cpu/all All
+cpu/all/averageFrequency Average CPU Frequency
+cpu/all/averageTemperature Average CPU Temperature
+cpu/all/coreCount Number of Cores
+cpu/all/cpuCount Number of CPUs
+cpu/all/maximumFrequency Maximum CPU Frequency
+cpu/all/maximumTemperature Maximum CPU Temperature
+cpu/all/minimumFrequency Minimum CPU Frequency
+cpu/all/minimumTemperature Minimum CPU Temperature
+cpu/all/name Name
+cpu/all/system System Usage
+cpu/all/usage Total Usage
+cpu/all/user User Usage
+cpu/all/wait Wait Usage
+gpu/all All GPUs
+gpu/all/totalVram All GPUs Total Memory
+gpu/all/usage All GPUs Usage
+gpu/all/usedPercent All GPUs Used Memory Percentage
+gpu/all/usedVram All GPUs Used Memory
+gpu GPU
+gpu/gpu0/coreFrequency GPU 1 Frequency
+gpu/gpu0 GPU 1
+gpu/gpu0/memoryFrequency GPU 1 Memory Frequency
+gpu/gpu0/name GPU 1 Name
+gpu/gpu0/power GPU 1 Power
+gpu/gpu0/temperature GPU 1 Temperature
+gpu/gpu0/totalVram GPU 1 Total Video Memory
+gpu/gpu0/usage GPU 1 Usage
+gpu/gpu0/usedPercent GPU 1 Video Memory Used Percentage
+gpu/gpu0/usedVram GPU 1 Video Memory Used
+lmsensors/acpitz-acpi-0 acpitz-acpi-0
+lmsensors/acpitz-acpi-0/temp1 Temperature 1
+lmsensors Hardware Sensors
+lmsensors/iwlwifi_1-virtual-0 iwlwifi_1-virtual-0
+lmsensors/iwlwifi_1-virtual-0/temp1 Temperature 1
+lmsensors/nct6798-isa-0290/fan1 Fan 1
+lmsensors/nct6798-isa-0290/fan2 Fan 2
+lmsensors/nct6798-isa-0290/fan3 Fan 3
+lmsensors/nct6798-isa-0290/fan4 Fan 4
+lmsensors/nct6798-isa-0290/fan5 Fan 5
+lmsensors/nct6798-isa-0290/fan6 Fan 6
+lmsensors/nct6798-isa-0290/fan7 Fan 7
+lmsensors/nct6798-isa-0290/in0 Voltage 0
+lmsensors/nct6798-isa-0290/in10 Voltage 10
+lmsensors/nct6798-isa-0290/in11 Voltage 11
+lmsensors/nct6798-isa-0290/in12 Voltage 12
+lmsensors/nct6798-isa-0290/in13 Voltage 13
+lmsensors/nct6798-isa-0290/in14 Voltage 14
+lmsensors/nct6798-isa-0290/in1 Voltage 1
+lmsensors/nct6798-isa-0290/in2 Voltage 2
+lmsensors/nct6798-isa-0290/in3 Voltage 3
+lmsensors/nct6798-isa-0290/in4 Voltage 4
+lmsensors/nct6798-isa-0290/in5 Voltage 5
+lmsensors/nct6798-isa-0290/in6 Voltage 6
+lmsensors/nct6798-isa-0290/in7 Voltage 7
+lmsensors/nct6798-isa-0290/in8 Voltage 8
+lmsensors/nct6798-isa-0290/in9 Voltage 9
+lmsensors/nct6798-isa-0290 nct6798-isa-0290
+lmsensors/nct6798-isa-0290/temp10 PCH_CHIP_CPU_MAX_TEMP
+lmsensors/nct6798-isa-0290/temp11 PCH_CHIP_TEMP
+lmsensors/nct6798-isa-0290/temp12 PCH_CPU_TEMP
+lmsensors/nct6798-isa-0290/temp1 SYSTIN
+lmsensors/nct6798-isa-0290/temp2 CPUTIN
+lmsensors/nct6798-isa-0290/temp3 AUXTIN0
+lmsensors/nct6798-isa-0290/temp4 AUXTIN1
+lmsensors/nct6798-isa-0290/temp5 AUXTIN2
+lmsensors/nct6798-isa-0290/temp6 AUXTIN3
+lmsensors/nct6798-isa-0290/temp7 AUXTIN4
+lmsensors/nct6798-isa-0290/temp8 PECI Agent 0
+lmsensors/nct6798-isa-0290/temp9 PECI Agent 0 Calibration
+lmsensors/nvme-pci-0200 nvme-pci-0200
+lmsensors/nvme-pci-0200/temp1 Composite
+lmsensors/nvme-pci-0400 nvme-pci-0400
+lmsensors/nvme-pci-0400/temp1 Composite
+lmsensors/nvme-pci-0400/temp3 Sensor 2
+memory/physical/application Application Memory
+memory/physical/applicationPercent Application Memory Percentage
+memory/physical/buffer Buffer Memory
+memory/physical/bufferPercent Buffer Memory Percentage
+memory/physical/cache Cache Memory
+memory/physical/cachePercent Cache Memory Percentage
+memory/physical/free Free Physical Memory
+memory/physical/freePercent Free Physical Memory Percentage
+memory/physical Physical Memory
+memory/physical/total Total Physical Memory
+memory/physical/usedPercent Used Physical Memory Percentage
+memory/physical/used Used Physical Memory

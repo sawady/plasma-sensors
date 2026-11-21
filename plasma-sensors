@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+"""plasma-sensors: show your PC's temperatures in a KDE Plasma 6 panel widget.
+
+It does two things, each optional:
+
+1. modules: loads the motherboard sensor driver (Super I/O chip such as Nuvoton
+   NCT67xx or ITE IT87xx) that many distros don't load on their own, and makes
+   it load on every boot (/etc/modules-load.d/plasma-sensors.conf).
+2. widget: adds a System Monitor widget to the panel with CPU and GPU
+   temperatures, and more sensors (usage, chipset, NVMe, fans, RAM) in the
+   popup that opens when you click it.
+
+Everything it writes is recorded in ~/.local/state/plasma-sensors/state.json and
+`plasma-sensors uninstall` undoes it.
+
+Only the Python standard library is used.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+VERSION = "0.1.0"
+
+# Super I/O drivers, tried in order until one finds a chip. Only one of them
+# can own the chip, so we stop at the first that adds a hwmon device.
+SUPERIO_MODULES = ["nct6775", "it87", "nct6683", "f71882fg", "w83627ehf"]
+# Board-specific drivers that complement the Super I/O one. Each is tried on
+# its own: they refuse to load on boards they don't support.
+EXTRA_MODULES = ["asus_ec_sensors", "asus_wmi_sensors"]
+
+MODULES_FILE = Path("/etc/modules-load.d/plasma-sensors.conf")
+MODULES_LOAD_DIRS = [
+    Path("/etc/modules-load.d"),
+    Path("/run/modules-load.d"),
+    Path("/usr/local/lib/modules-load.d"),
+    Path("/usr/lib/modules-load.d"),
+]
+STATE_FILE = (
+    Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    / "plasma-sensors"
+    / "state.json"
+)
+APPLETSRC = (
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "plasma-org.kde.plasma.desktop-appletsrc"
+)
+PLASMASHELL_UNIT = "plasma-plasmashell.service"
+KSYSTEMSTATS_UNIT = "plasma-ksystemstats.service"
+WIDGET_PLUGIN = "org.kde.plasma.systemmonitor"
+
+TEMP_MIN, TEMP_MAX = 15.0, 110.0  # readings outside this are unplugged inputs
+CHIPSET_LABEL = re.compile(r"^(PCH_CHIP_TEMP|PCH|PCH Temp|Chipset)$", re.I)
+BOARD_LABEL = re.compile(r"^(SYSTIN|Motherboard|MB Temp|System)$", re.I)
+
+# --- i18n -------------------------------------------------------------------
+
+TEXT = {
+    "en": {
+        "title": "Sensors",
+        "cpu": "CPU",
+        "cpu_usage": "CPU usage",
+        "gpu": "GPU",
+        "gpu_usage": "GPU usage",
+        "gpu_power": "GPU power",
+        "ram": "RAM",
+        "chipset": "Chipset",
+        "board": "Board",
+        "nvme": "NVMe",
+        "fan": "Fan",
+        "modules_header": "Motherboard sensor drivers",
+        "modules_loaded": "  {m}: already loaded",
+        "modules_persisted": "  {m}: already loads on boot",
+        "modules_try": "  {m}: trying...",
+        "modules_found": "  {m}: found {chips}",
+        "modules_nothing": "  {m}: loaded but found no chip, unloading",
+        "modules_fail": "  {m}: no supported chip",
+        "modules_missing": "  {m}: not available in this kernel",
+        "modules_none": "No motherboard sensor chip found. See Troubleshooting in the README.",
+        "modules_write": "Writing {f} so they load on every boot: {mods}",
+        "modules_sudo": "Loading kernel modules needs sudo; you may be asked for your password.",
+        "modules_ok": "Nothing to persist.",
+        "widget_header": "Widget",
+        "widget_panel": "In the panel: {s}",
+        "widget_popup": "In the popup: {s}",
+        "widget_added": "Added the widget (id {w}) to {where}.",
+        "widget_panel_word": "the panel",
+        "widget_desktop_word": "the desktop",
+        "widget_reorder": "Restarting Plasma to place it before the system tray (the screen flickers for a moment)...",
+        "widget_no_reorder": "Left the widget at the end of the panel. Drag it where you want in Edit Mode.",
+        "widget_none": "No temperature sensors found for the widget.",
+        "uninstall_widget": "Removed the widget (id {w}).",
+        "uninstall_widget_gone": "The widget (id {w}) was already gone.",
+        "uninstall_modules": "Removed {f}. The drivers stay loaded until you reboot.",
+        "uninstall_nothing": "Nothing to uninstall.",
+        "need_plasma": "Plasma doesn't seem to be running (couldn't reach plasmashell over D-Bus).",
+        "need_tool": "Missing `{t}`. Install it with your package manager ({pkg}).",
+        "dry_run": "[dry run] {c}",
+        "done": "Done.",
+    },
+    "es": {
+        "title": "Sensores",
+        "cpu": "CPU",
+        "cpu_usage": "CPU uso",
+        "gpu": "GPU",
+        "gpu_usage": "GPU uso",
+        "gpu_power": "GPU consumo",
+        "ram": "RAM",
+        "chipset": "Chipset",
+        "board": "Placa",
+        "nvme": "NVMe",
+        "fan": "Ventilador",
+        "modules_header": "Drivers de sensores de la placa madre",
+        "modules_loaded": "  {m}: ya está cargado",
+        "modules_persisted": "  {m}: ya se carga al arrancar",
+        "modules_try": "  {m}: probando...",
+        "modules_found": "  {m}: encontró {chips}",
+        "modules_nothing": "  {m}: cargó pero no encontró ningún chip, lo descargo",
+        "modules_fail": "  {m}: ningún chip compatible",
+        "modules_missing": "  {m}: no está en este kernel",
+        "modules_none": "No se encontró el chip de sensores de la placa. Mirá Troubleshooting en el README.",
+        "modules_write": "Escribo {f} para que carguen en cada arranque: {mods}",
+        "modules_sudo": "Cargar módulos del kernel necesita sudo; puede que te pida la contraseña.",
+        "modules_ok": "No hay nada que dejar persistido.",
+        "widget_header": "Widget",
+        "widget_panel": "En el panel: {s}",
+        "widget_popup": "En el popup: {s}",
+        "widget_added": "Agregué el widget (id {w}) {where}.",
+        "widget_panel_word": "al panel",
+        "widget_desktop_word": "al escritorio",
+        "widget_reorder": "Reinicio Plasma para ubicarlo antes de la bandeja del sistema (la pantalla parpadea un momento)...",
+        "widget_no_reorder": "El widget quedó al final del panel. Movelo donde quieras en el Modo de edición.",
+        "widget_none": "No encontré sensores de temperatura para el widget.",
+        "uninstall_widget": "Saqué el widget (id {w}).",
+        "uninstall_widget_gone": "El widget (id {w}) ya no estaba.",
+        "uninstall_modules": "Borré {f}. Los drivers siguen cargados hasta que reinicies.",
+        "uninstall_nothing": "No hay nada para desinstalar.",
+        "need_plasma": "Parece que Plasma no está corriendo (no pude hablar con plasmashell por D-Bus).",
+        "need_tool": "Falta `{t}`. Instalalo con tu gestor de paquetes ({pkg}).",
+        "dry_run": "[simulación] {c}",
+        "done": "Listo.",
+    },
+}
+
+
+def detect_lang(env=os.environ):
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        value = env.get(var)
+        if value:
+            return "es" if value.lower().startswith("es") else "en"
+    return "en"
+
+
+LANG = detect_lang()
+
+
+def t(key, **kw):
+    return TEXT[LANG][key].format(**kw)
+
+
+# --- sensor discovery (pure, tested) ----------------------------------------
+
+
+def parse_kstats_list(text):
+    """`kstatsviewer --list` output -> {sensor_id: name}."""
+    ids = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        sid, _, name = line.partition(" ")
+        ids[sid] = name
+    return ids
+
+
+def hwmon_features(sensors_json):
+    """`sensors -j` output -> [(chip, feature, label, value)].
+
+    `sensors -j` keys features by label ("SYSTIN", "Composite"); KSystemStats
+    keys them by the raw feature name ("temp1"), which we recover from the
+    subfeature keys ("temp1_input").
+    """
+    out = []
+    for chip, features in sensors_json.items():
+        if not isinstance(features, dict):
+            continue
+        for label, subs in features.items():
+            if not isinstance(subs, dict):
+                continue
+            for key, value in subs.items():
+                m = re.fullmatch(r"([a-z]+\d+)_input", key)
+                if m:
+                    out.append((chip, m.group(1), label, value))
+                    break
+    return out
+
+
+def _plausible_temp(value):
+    return isinstance(value, (int, float)) and TEMP_MIN <= value <= TEMP_MAX
+
+
+def select_sensors(kstats_ids, sensors_json, lang="en"):
+    """Pick what to show. Returns (panel, popup), lists of (sensor_id, label)."""
+    tx = TEXT[lang]
+    panel, popup = [], []
+
+    def add(dest, sid, label):
+        if sid in kstats_ids and all(sid != s for s, _ in panel + popup):
+            dest.append((sid, label))
+
+    gpus = sorted(
+        {m.group(1) for sid in kstats_ids if (m := re.fullmatch(r"gpu/(gpu\d+)/temperature", sid))},
+        key=lambda g: int(g[3:]),
+    )
+
+    def gpu_label(base, gpu):
+        return base if len(gpus) == 1 else f"{base} {int(gpu[3:]) + 1}"
+
+    add(panel, "cpu/all/maximumTemperature", tx["cpu"])
+    for gpu in gpus:
+        add(panel, f"gpu/{gpu}/temperature", gpu_label(tx["gpu"], gpu))
+
+    add(popup, "cpu/all/usage", tx["cpu_usage"])
+    for gpu in gpus:
+        add(popup, f"gpu/{gpu}/usage", gpu_label(tx["gpu_usage"], gpu))
+        add(popup, f"gpu/{gpu}/power", gpu_label(tx["gpu_power"], gpu))
+
+    features = hwmon_features(sensors_json)
+    chipset = board = None
+    nvmes, fans = [], []
+    for chip, feat, label, value in features:
+        sid = f"lmsensors/{chip}/{feat}"
+        if sid not in kstats_ids:
+            continue
+        if chip.startswith("nvme") and label == "Composite":
+            nvmes.append(sid)
+        elif feat.startswith("temp") and _plausible_temp(value):
+            if chipset is None and CHIPSET_LABEL.match(label):
+                chipset = sid
+            elif board is None and BOARD_LABEL.match(label):
+                board = sid
+        elif feat.startswith("fan") and isinstance(value, (int, float)) and value > 0:
+            fans.append((sid, feat, label))
+
+    if chipset:
+        add(popup, chipset, tx["chipset"])
+    if board:
+        add(popup, board, tx["board"])
+    for i, sid in enumerate(sorted(nvmes), 1):
+        add(popup, sid, tx["nvme"] if len(nvmes) == 1 else f"{tx['nvme']} {i}")
+    add(popup, "memory/physical/usedPercent", tx["ram"])
+    for sid, feat, label in fans:
+        name = f"{tx['fan']} {feat[3:]}" if label == feat else label
+        add(popup, sid, name)
+
+    if not panel:  # no CPU/GPU temperature: promote the first popup temperature
+        for i, (sid, label) in enumerate(popup):
+            if sid.startswith("lmsensors/") and "/temp" in sid:
+                panel.append(popup.pop(i))
+                break
+    return panel, popup
+
+
+def reorder_applet_order(text, containment_id, widget_id, before_id):
+    """Move widget_id right before before_id in a containment's AppletOrder.
+
+    Returns the new appletsrc text, or None if there is no AppletOrder to edit.
+    """
+    header = f"[Containments][{containment_id}][General]"
+    lines = text.splitlines(keepends=True)
+    in_section = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_section = stripped == header
+            continue
+        if in_section and stripped.startswith("AppletOrder="):
+            ids = [x for x in stripped.split("=", 1)[1].split(";") if x]
+            w, b = str(widget_id), str(before_id)
+            if b not in ids:
+                return None
+            ids = [x for x in ids if x != w]
+            ids.insert(ids.index(b), w)
+            newline = "\n" if line.endswith("\n") else ""
+            lines[i] = "AppletOrder=" + ";".join(ids) + newline
+            return "".join(lines)
+    return None
+
+
+def persisted_modules(dirs=MODULES_LOAD_DIRS):
+    """Module names listed in any modules-load.d file, normalized to underscores."""
+    names = set()
+    for d in dirs:
+        try:
+            files = sorted(d.glob("*.conf"))
+        except OSError:
+            continue
+        for f in files:
+            try:
+                content = f.read_text()
+            except OSError:
+                continue
+            for line in content.splitlines():
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    names.add(line.replace("-", "_"))
+    return names
+
+
+# --- system helpers ---------------------------------------------------------
+
+
+class Runner:
+    def __init__(self, dry_run=False):
+        self.dry_run = dry_run
+
+    def run(self, cmd, check=True, capture=False, mutate=True, **kw):
+        if self.dry_run and mutate:
+            print(t("dry_run", c=" ".join(cmd)))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.run(
+            cmd, check=check, text=True, capture_output=capture, **kw
+        )
+
+
+def need(tool, pkg):
+    if not shutil.which(tool):
+        sys.exit(t("need_tool", t=tool, pkg=pkg))
+
+
+def loaded_modules():
+    try:
+        return {line.split()[0] for line in Path("/proc/modules").read_text().splitlines()}
+    except OSError:
+        return set()
+
+
+def hwmon_names():
+    out = {}
+    for d in Path("/sys/class/hwmon").glob("hwmon*"):
+        try:
+            out[d.name] = (d / "name").read_text().strip()
+        except OSError:
+            pass
+    return out
+
+
+def module_exists(name):
+    return subprocess.run(["modinfo", name], capture_output=True).returncode == 0
+
+
+def read_sensors_json():
+    need("sensors", "lm_sensors / lm-sensors")
+    res = subprocess.run(["sensors", "-j"], capture_output=True, text=True)
+    try:
+        return json.loads(res.stdout or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def read_kstats_ids():
+    need("kstatsviewer", "ksystemstats")
+    res = subprocess.run(["kstatsviewer", "--list"], capture_output=True, text=True)
+    return parse_kstats_list(res.stdout)
+
+
+def plasma_eval(script):
+    """Run a Plasma desktop script; returns what it print()s."""
+    res = None
+    if shutil.which("busctl"):
+        cmd = ["busctl", "--user", "--json=short", "call", "org.kde.plasmashell",
+               "/PlasmaShell", "org.kde.PlasmaShell", "evaluateScript", "s", script]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            return json.loads(res.stdout)["data"][0]
+    else:
+        qdbus = shutil.which("qdbus6") or shutil.which("qdbus")
+        if qdbus:
+            res = subprocess.run([qdbus, "org.kde.plasmashell", "/PlasmaShell",
+                                  "org.kde.PlasmaShell.evaluateScript", script],
+                                 capture_output=True, text=True)
+            if res.returncode == 0:
+                return res.stdout
+    detail = res.stderr.strip() if res is not None and res.stderr else ""
+    sys.exit(t("need_plasma") + ("\n" + detail if detail else ""))
+
+
+def user_unit_active(unit):
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit]).returncode == 0
+
+
+def load_state():
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
+
+
+# --- modules ----------------------------------------------------------------
+
+
+def setup_modules(runner, state):
+    print(t("modules_header"))
+    loaded = loaded_modules()
+    persisted = persisted_modules()
+    ours = set(state.get("modules", []))
+    to_persist = []
+    warned_sudo = False
+
+    def try_module(m):
+        nonlocal warned_sudo
+        if m in loaded:
+            print(t("modules_persisted" if m in persisted else "modules_loaded", m=m))
+            return True
+        if not module_exists(m):
+            print(t("modules_missing", m=m))
+            return False
+        if not warned_sudo and not runner.dry_run:
+            print(t("modules_sudo"))
+            warned_sudo = True
+        print(t("modules_try", m=m))
+        before = hwmon_names()
+        res = runner.run(["sudo", "modprobe", m], check=False, capture=True)
+        if res.returncode != 0:
+            print(t("modules_fail", m=m))
+            return False
+        if runner.dry_run:
+            return False
+        time.sleep(0.5)
+        new = {k: v for k, v in hwmon_names().items() if k not in before}
+        if not new:
+            print(t("modules_nothing", m=m))
+            runner.run(["sudo", "modprobe", "-r", m], check=False, capture=True)
+            return False
+        print(t("modules_found", m=m, chips=", ".join(sorted(set(new.values())))))
+        return True
+
+    found_any = False
+    for m in SUPERIO_MODULES:
+        if try_module(m):
+            found_any = True
+            if m not in persisted or m in ours:
+                to_persist.append(m)
+            break
+    for m in EXTRA_MODULES:
+        if try_module(m):
+            found_any = True
+            if m not in persisted or m in ours:
+                to_persist.append(m)
+
+    if not found_any and not runner.dry_run:
+        print(t("modules_none"))
+
+    to_persist = sorted(set(to_persist) | (ours & loaded_modules()))
+    if to_persist and set(to_persist) != ours:
+        print(t("modules_write", f=MODULES_FILE, mods=", ".join(to_persist)))
+        content = (
+            "# Written by plasma-sensors (https://github.com/sawady/plasma-sensors).\n"
+            "# `plasma-sensors uninstall` removes this file.\n"
+            + "".join(f"{m}\n" for m in to_persist)
+        )
+        runner.run(["sudo", "tee", str(MODULES_FILE)], input=content, capture=True)
+        if not runner.dry_run:
+            state["modules"] = to_persist
+            state["modules_file"] = str(MODULES_FILE)
+    elif not to_persist:
+        print(t("modules_ok"))
+
+    # KSystemStats only lists hwmon chips it saw at startup.
+    if found_any and not runner.dry_run and user_unit_active(KSYSTEMSTATS_UNIT):
+        subprocess.run(["systemctl", "--user", "restart", KSYSTEMSTATS_UNIT], check=False)
+        time.sleep(2)
+
+
+# --- widget -----------------------------------------------------------------
+
+WIDGET_JS = r"""
+var cfg = %s;
+function findContainment(id) {
+  var p = panelById(id);
+  if (p) return p;
+  var ds = desktops();
+  for (var i = 0; i < ds.length; i++) if (ds[i].id == id) return ds[i];
+  return null;
+}
+if (cfg.previous) {
+  var pc = findContainment(cfg.previous.containment);
+  var pw = pc ? pc.widgetById(cfg.previous.widget) : null;
+  if (pw) pw.remove();
+}
+var result = {};
+if (cfg.remove_only) {
+  print(JSON.stringify(result));
+} else {
+  var target = null, w = null;
+  if (cfg.where === "panel") {
+    var ps = panels(), best = null;
+    for (var i = 0; i < ps.length; i++) {
+      if (ps[i].location === "bottom" && (best === null || ps[i].screen === 0)) best = ps[i];
+    }
+    target = best || (ps.length ? ps[0] : null);
+  }
+  if (target) {
+    w = target.addWidget(cfg.plugin);
+    result.where = "panel";
+    var ws = target.widgets();
+    for (var j = 0; j < ws.length; j++) {
+      if (ws[j].type === "org.kde.plasma.systemtray") result.systray = ws[j].id;
+    }
+  } else {
+    target = desktopForScreen(0);
+    var g = screenGeometry(0);
+    w = target.addWidget(cfg.plugin, g.width - 340, 60, 300, 340);
+    result.where = "desktop";
+  }
+  w.currentConfigGroup = ["Appearance"];
+  w.writeConfig("chartFace", "org.kde.ksysguard.textonly");
+  w.writeConfig("title", cfg.title);
+  w.writeConfig("showTitle", true);
+  w.currentConfigGroup = ["Sensors"];
+  w.writeConfig("highPrioritySensorIds", JSON.stringify(cfg.high));
+  w.writeConfig("lowPrioritySensorIds", JSON.stringify(cfg.low));
+  w.writeConfig("totalSensors", "[]");
+  w.currentConfigGroup = ["SensorLabels"];
+  for (var k in cfg.labels) w.writeConfig(k, cfg.labels[k]);
+  w.reloadConfig();
+  result.containment = target.id;
+  result.widget = w.id;
+  print(JSON.stringify(result));
+}
+"""
+
+
+def widget_script(cfg):
+    return WIDGET_JS % json.dumps(cfg)
+
+
+def describe(items):
+    return ", ".join(label for _, label in items) or "-"
+
+
+def setup_widget(runner, state, where, restart):
+    print(t("widget_header"))
+    panel, popup = select_sensors(read_kstats_ids(), read_sensors_json(), LANG)
+    if not panel and not popup:
+        print(t("widget_none"))
+        return
+    print(t("widget_panel", s=describe(panel)))
+    print(t("widget_popup", s=describe(popup)))
+    cfg = {
+        "plugin": WIDGET_PLUGIN,
+        "where": where,
+        "title": t("title"),
+        "high": [s for s, _ in panel],
+        "low": [s for s, _ in popup],
+        "labels": {s: label for s, label in panel + popup},
+        "previous": state.get("widget"),
+    }
+    if runner.dry_run:
+        print(t("dry_run", c="plasmashell evaluateScript <add widget>"))
+        return
+    result = json.loads(plasma_eval(widget_script(cfg)).strip())
+    state["widget"] = {"containment": result["containment"], "widget": result["widget"]}
+    save_state(state)
+    word = t("widget_panel_word" if result["where"] == "panel" else "widget_desktop_word")
+    print(t("widget_added", w=result["widget"], where=word))
+
+    if result["where"] != "panel" or "systray" not in result:
+        return
+    if not (restart and user_unit_active(PLASMASHELL_UNIT)):
+        print(t("widget_no_reorder"))
+        return
+    print(t("widget_reorder"))
+    subprocess.run(["systemctl", "--user", "stop", PLASMASHELL_UNIT], check=True)
+    try:
+        text = APPLETSRC.read_text()
+        new = reorder_applet_order(text, result["containment"], result["widget"], result["systray"])
+        if new is not None:
+            APPLETSRC.write_text(new)
+    finally:
+        subprocess.run(["systemctl", "--user", "start", PLASMASHELL_UNIT], check=True)
+
+
+# --- commands ---------------------------------------------------------------
+
+
+def cmd_detect(args):
+    print(t("modules_header"))
+    loaded, persisted = loaded_modules(), persisted_modules()
+    for m in SUPERIO_MODULES + EXTRA_MODULES:
+        if m in loaded:
+            print(t("modules_persisted" if m in persisted else "modules_loaded", m=m))
+        elif not module_exists(m):
+            print(t("modules_missing", m=m))
+    print()
+    print(t("widget_header"))
+    panel, popup = select_sensors(read_kstats_ids(), read_sensors_json(), LANG)
+    print(t("widget_panel", s=describe(panel)))
+    print(t("widget_popup", s=describe(popup)))
+
+
+def cmd_install(args):
+    runner = Runner(args.dry_run)
+    state = load_state()
+    if not args.no_modules:
+        setup_modules(runner, state)
+        if not runner.dry_run:
+            save_state(state)
+        print()
+    if not args.no_widget:
+        setup_widget(runner, state, "desktop" if args.desktop else "panel", not args.no_restart)
+    print(t("done"))
+
+
+def cmd_uninstall(args):
+    runner = Runner(args.dry_run)
+    state = load_state()
+    if not state:
+        print(t("uninstall_nothing"))
+        return
+    widget = state.get("widget")
+    if widget:
+        if runner.dry_run:
+            print(t("dry_run", c="plasmashell evaluateScript <remove widget>"))
+        else:
+            before = plasma_eval(
+                "var c = panelById(%d); if (!c) { var ds = desktops(); for (var i = 0; i < ds.length; i++) "
+                "if (ds[i].id == %d) c = ds[i]; } print(c && c.widgetById(%d) ? 'yes' : 'no');"
+                % (widget["containment"], widget["containment"], widget["widget"])
+            ).strip()
+            if before == "yes":
+                plasma_eval(widget_script({"previous": widget, "remove_only": True}))
+                print(t("uninstall_widget", w=widget["widget"]))
+            else:
+                print(t("uninstall_widget_gone", w=widget["widget"]))
+    if state.get("modules_file"):
+        runner.run(["sudo", "rm", "-f", state["modules_file"]])
+        print(t("uninstall_modules", f=state["modules_file"]))
+    if not runner.dry_run:
+        STATE_FILE.unlink(missing_ok=True)
+    print(t("done"))
+
+
+def main(argv=None):
+    global LANG
+    parser = argparse.ArgumentParser(
+        prog="plasma-sensors",
+        description="Show your PC's temperatures in a KDE Plasma 6 panel widget.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument("--lang", choices=["en", "es"], help="language for messages and widget labels")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("install", help="load sensor drivers and add the widget")
+    p.add_argument("--no-modules", action="store_true", help="skip the kernel modules step")
+    p.add_argument("--no-widget", action="store_true", help="skip the widget step")
+    p.add_argument("--desktop", action="store_true", help="put the widget on the desktop instead of the panel")
+    p.add_argument("--no-restart", action="store_true",
+                   help="don't restart Plasma to place the widget before the system tray")
+    p.add_argument("--dry-run", action="store_true", help="print what would change, change nothing")
+    p.set_defaults(func=cmd_install)
+
+    p = sub.add_parser("uninstall", help="remove the widget and the modules-load.d file")
+    p.add_argument("--dry-run", action="store_true", help="print what would change, change nothing")
+    p.set_defaults(func=cmd_uninstall)
+
+    p = sub.add_parser("detect", help="show what would be shown, change nothing")
+    p.set_defaults(func=cmd_detect)
+
+    args = parser.parse_args(argv)
+    if args.lang:
+        LANG = args.lang
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
